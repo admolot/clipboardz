@@ -2,6 +2,8 @@ import time
 import threading
 import keyboard
 import pyperclip
+import pystray
+from PIL import Image, ImageDraw
 from collections import deque
 
 class FIFOClipboard:
@@ -15,56 +17,64 @@ class FIFOClipboard:
         while self.is_running:
             try:
                 current_clipboard = pyperclip.paste()
-                # If the clipboard changed and is not empty, add to queue
                 if current_clipboard != self.last_seen and current_clipboard:
                     self.queue.append(current_clipboard)
-                    print(f"[+] Added to queue: {repr(current_clipboard[:30])}...")
                 self.last_seen = current_clipboard
             except Exception:
                 pass
-            time.sleep(0.1) # Check every 100ms
+            time.sleep(0.1) 
 
     def paste_oldest(self):
         """Triggered when Ctrl+V is pressed."""
+        # Release the Ctrl key virtually so our 'shift+insert' doesn't become 'ctrl+shift+insert'
+        keyboard.release('ctrl')
+        
         if self.queue:
-            # Get the oldest copied item and remove it from memory
             item = self.queue.popleft()
-            
-            # Update last_seen so our monitor doesn't re-queue it
             self.last_seen = item
-            
-            # Put the item on the actual Windows clipboard
             pyperclip.copy(item)
-            
-            # Wait a tiny bit for the Windows clipboard to register the change
             time.sleep(0.05)
-            
-            # Simulate a Paste using Shift+Insert (avoids triggering Ctrl+V again)
             keyboard.send('shift+insert')
-            print(f"[-] Pasted & Forgot: {repr(item[:30])}... | Items left: {len(self.queue)}")
         else:
-            # If memory is empty, just paste whatever is currently in the clipboard normally
+            # Paste normally if memory is empty
             keyboard.send('shift+insert')
-            print("[!] Memory empty. Pasted current default clipboard.")
 
     def start(self):
-        print("=== FIFO Clipboard Manager Started ===")
-        print("1. Copy items normally using Ctrl+C")
-        print("2. Press Ctrl+V to paste the oldest item and forget it")
-        print("3. Press 'ESC' to close the program\n")
-        
-        # Suppress the default Ctrl+V action and attach our custom function
         keyboard.add_hotkey('ctrl+v', self.paste_oldest, suppress=True)
-        
-        # Start the background monitoring thread
-        monitor_thread = threading.Thread(target=self.monitor_clipboard, daemon=True)
-        monitor_thread.start()
-        
-        # Keep the program running until the user presses Escape
-        keyboard.wait('esc')
-        self.is_running = False
-        print("Exiting...")
+        self.monitor_thread = threading.Thread(target=self.monitor_clipboard, daemon=True)
+        self.monitor_thread.start()
 
-if __name__ == "__main__":
+    def stop(self):
+        self.is_running = False
+        keyboard.unhook_all()
+
+def create_tray_icon_image():
+    """Generates a simple blue icon with a white square inside for the System Tray."""
+    image = Image.new('RGB', (64, 64), color=(0, 120, 215)) # Windows Blue
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([16, 16, 48, 48], outline="white", width=4)
+    return image
+
+def main():
+    # 1. Start the clipboard manager logic
     manager = FIFOClipboard()
     manager.start()
+
+    # 2. Define what happens when "Quit" is clicked in the tray
+    def on_quit(icon, item):
+        manager.stop()
+        icon.stop()
+
+    # 3. Create the System Tray icon
+    tray_icon = pystray.Icon(
+        "FIFO_Clipboard",
+        create_tray_icon_image(),
+        "FIFO Clipboard Manager",
+        menu=pystray.Menu(pystray.MenuItem("Quit", on_quit))
+    )
+    
+    # 4. Run the tray icon (This keeps the program running in the background)
+    tray_icon.run()
+
+if __name__ == "__main__":
+    main()
