@@ -2,7 +2,7 @@ import time
 import threading
 import ctypes
 import keyboard
-import pyperclip
+import win32clipboard
 import pystray
 from PIL import Image, ImageDraw
 from collections import deque
@@ -10,11 +10,52 @@ from collections import deque
 class FIFOClipboard:
     def __init__(self):
         self.queue = deque()
-        # Get the deep Windows OS clipboard sequence ID
         self.last_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
         self.is_running = True
         self.is_pasting = False
         self.icon = None
+        
+        # We want to capture Plain text, Web HTML (bold/colors), and Word Rich Text
+        self.formats_to_save =[
+            win32clipboard.CF_UNICODETEXT,
+            win32clipboard.RegisterClipboardFormat("HTML Format"),
+            win32clipboard.RegisterClipboardFormat("Rich Text Format")
+        ]
+
+    def get_clipboard_data(self):
+        """Safely opens clipboard and extracts Plain Text, HTML, and RTF."""
+        data = {}
+        # Try 5 times in case another app is currently locking the clipboard
+        for _ in range(5):
+            try:
+                win32clipboard.OpenClipboard()
+                for fmt in self.formats_to_save:
+                    if win32clipboard.IsClipboardFormatAvailable(fmt):
+                        try:
+                            data[fmt] = win32clipboard.GetClipboardData(fmt)
+                        except Exception:
+                            pass
+                win32clipboard.CloseClipboard()
+                return data
+            except Exception:
+                time.sleep(0.02)
+        return data
+
+    def set_clipboard_data(self, data):
+        """Safely opens clipboard and restores all formats."""
+        for _ in range(5):
+            try:
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                for fmt, content in data.items():
+                    try:
+                        win32clipboard.SetClipboardData(fmt, content)
+                    except Exception:
+                        pass
+                win32clipboard.CloseClipboard()
+                return
+            except Exception:
+                time.sleep(0.02)
 
     def monitor_clipboard(self):
         """Monitors Windows OS directly for copy events."""
@@ -22,32 +63,37 @@ class FIFOClipboard:
             try:
                 current_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
                 
-                # If Windows registers a new copy action, and we aren't currently pasting
                 if current_seq != self.last_seq and not self.is_pasting:
                     self.last_seq = current_seq
-                    current_clipboard = pyperclip.paste()
+                    time.sleep(0.05) # Wait for the copying app to release the clipboard
                     
-                    # Ensure it's text, and prevent duplicates if you spam Ctrl+C
-                    if current_clipboard and (not self.queue or self.queue[-1] != current_clipboard):
-                        self.queue.append(current_clipboard)
+                    data = self.get_clipboard_data()
+                    
+                    # Extract the plain text version so we can display it in the tray menu
+                    text = data.get(win32clipboard.CF_UNICODETEXT, "")
+                    
+                    # If it has text, and it's not a spam duplicate of the last item
+                    if text and (not self.queue or self.queue[-1]['text'] != text):
+                        self.queue.append({'text': text, 'data': data})
                         self.update_tray()
             except Exception:
                 pass
-            time.sleep(0.05) # Super fast 50ms polling
+            time.sleep(0.05) 
 
     def paste_oldest(self):
         """Triggered on Ctrl+V."""
-        keyboard.release('ctrl') # Let go of Ctrl virtually so Shift+Insert works cleanly
+        keyboard.release('ctrl') 
         if self.queue:
             self.is_pasting = True
             item = self.queue.popleft()
             
-            pyperclip.copy(item)
+            # Put the Rich Text / HTML back on the clipboard
+            self.set_clipboard_data(item['data'])
+            
             time.sleep(0.05) 
             keyboard.send('shift+insert')
             time.sleep(0.05) 
             
-            # Update our sequence ID so we don't accidentally "copy" our own paste
             self.last_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
             self.is_pasting = False
             self.update_tray()
@@ -68,7 +114,6 @@ class FIFOClipboard:
         self.is_running = False
         keyboard.unhook_all()
 
-
 def create_tray_icon_image():
     """Draws a simple icon for the system tray."""
     image = Image.new('RGB', (64, 64), color=(0, 120, 215))
@@ -85,14 +130,13 @@ def main():
         icon.stop()
 
     def create_menu():
-        """Dynamically creates the menu list every time you click the tray icon."""
+        """Dynamically creates the menu list every time you right click the tray icon."""
         items =[]
         items.append(pystray.MenuItem(f"Items stored: {len(manager.queue)}", lambda: None, enabled=False))
         items.append(pystray.MenuItem("--------", lambda: None, enabled=False))
         
-        # Show up to 15 items in the list
-        for i, text in enumerate(list(manager.queue)[:15]):
-            # Clean up the text so it looks nice in the menu
+        for i, item in enumerate(list(manager.queue)[:15]):
+            text = item['text']
             preview = text.replace('\n', ' ').replace('\r', '')
             if len(preview) > 40:
                 preview = preview[:37] + "..."
