@@ -42,7 +42,7 @@ user32.SetClipboardData.restype = wintypes.HANDLE
 user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
 user32.EnumClipboardFormats.restype = wintypes.UINT
 
-kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.argtypes =[wintypes.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = wintypes.HANDLE
 kernel32.GlobalLock.argtypes =[wintypes.HANDLE]
 kernel32.GlobalLock.restype = wintypes.LPVOID
@@ -59,6 +59,7 @@ class FIFOClipboard:
         self.is_running = True
         self.is_pasting = False
         self.icon = None
+        self.hk = None
 
     def get_clipboard_data(self):
         """Safely opens memory and clones EVERY format on the clipboard."""
@@ -68,7 +69,6 @@ class FIFOClipboard:
                 try:
                     fmt = 0
                     while True:
-                        # Iterate through all available clipboard formats
                         fmt = user32.EnumClipboardFormats(fmt)
                         if fmt == 0:
                             break
@@ -77,7 +77,6 @@ class FIFOClipboard:
                             ptr = kernel32.GlobalLock(handle)
                             if ptr:
                                 size = kernel32.GlobalSize(handle)
-                                # Grab exactly what is in memory as raw bytes
                                 data[fmt] = ctypes.string_at(ptr, size)
                                 kernel32.GlobalUnlock(handle)
                 finally:
@@ -118,11 +117,9 @@ class FIFOClipboard:
                     
                     data = self.get_clipboard_data()
                     
-                    # Convert the raw memory bytes back into a readable Python string for our tray menu
                     raw_text_bytes = data.get(CF_UNICODETEXT, b"")
                     text = raw_text_bytes.decode('utf-16-le', errors='ignore').rstrip('\x00')
                     
-                    # Ensure the copied object actually has text, and prevent duplicate spam
                     if text and (not self.queue or self.queue[-1]['text'] != text):
                         self.queue.append({'text': text, 'data': data})
                         self.update_tray()
@@ -132,23 +129,49 @@ class FIFOClipboard:
 
     def paste_oldest(self):
         """Triggered on Ctrl+V."""
-        keyboard.release('ctrl') 
-        if self.queue:
-            self.is_pasting = True
-            item = self.queue.popleft()
+        # Prevent simultaneous overlapping pastes if pressed rapidly
+        if self.is_pasting:
+            return
             
-            # Put every single format exactly back on the clipboard
-            self.set_clipboard_data(item['data'])
-            
-            time.sleep(0.05) 
-            keyboard.send('shift+insert')
-            time.sleep(0.05) 
-            
-            self.last_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
+        self.is_pasting = True
+        
+        # Safely remove our custom hook so we can send a REAL Ctrl+V to the system
+        try:
+            keyboard.remove_hotkey(self.hk)
+        except Exception:
+            pass
+
+        try:
+            if self.queue:
+                item = self.queue.popleft()
+                
+                # Put all formatting (HTML/Colors/Bold) back on the clipboard
+                self.set_clipboard_data(item['data'])
+                time.sleep(0.05) 
+                
+                # Trick the OS: Reset logical key states before pasting
+                keyboard.release('ctrl')
+                keyboard.release('v')
+                time.sleep(0.01)
+                
+                # Send standard Ctrl+V (which Anki MUST see to parse HTML!)
+                keyboard.send('ctrl+v')
+                time.sleep(0.05) 
+                
+                # Update OS Sequence ID so the monitor thread ignores this paste
+                self.last_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
+                self.update_tray()
+            else:
+                # If memory is empty, just paste normally
+                keyboard.release('ctrl')
+                keyboard.release('v')
+                time.sleep(0.01)
+                keyboard.send('ctrl+v')
+                time.sleep(0.05)
+        finally:
+            # Re-hook our script to capture the next Ctrl+V
+            self.hk = keyboard.add_hotkey('ctrl+v', self.paste_oldest, suppress=True)
             self.is_pasting = False
-            self.update_tray()
-        else:
-            keyboard.send('shift+insert')
 
     def update_tray(self):
         """Updates the text you see when hovering over the tray icon."""
@@ -156,7 +179,7 @@ class FIFOClipboard:
             self.icon.title = f"FIFO Clipboard: {len(self.queue)} items"
 
     def start(self):
-        keyboard.add_hotkey('ctrl+v', self.paste_oldest, suppress=True)
+        self.hk = keyboard.add_hotkey('ctrl+v', self.paste_oldest, suppress=True)
         self.monitor_thread = threading.Thread(target=self.monitor_clipboard, daemon=True)
         self.monitor_thread.start()
 
