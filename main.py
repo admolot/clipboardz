@@ -1,11 +1,31 @@
+import sys
 import time
 import threading
 import ctypes
 import keyboard
+
+# --- Fix for PyInstaller missing pywin32 modules ---
+import pywintypes
 import win32clipboard
+
 import pystray
 from PIL import Image, ImageDraw
 from collections import deque
+
+# --- Monkey-patch pystray to open menu on Left-Click (Windows) ---
+if sys.platform == 'win32':
+    import pystray._win32
+    original_on_notify = pystray._win32.Icon._on_notify
+
+    def patched_on_notify(self, wparam, lparam):
+        # 0x0202 is WM_LBUTTONUP (Left Click), 0x0205 is WM_RBUTTONUP (Right Click)
+        # If the user Left-Clicks, we instantly convert it to a Right-Click to force the menu to open.
+        if lparam == 0x0202: 
+            lparam = 0x0205 
+        return original_on_notify(self, wparam, lparam)
+
+    pystray._win32.Icon._on_notify = patched_on_notify
+# -----------------------------------------------------------------
 
 class FIFOClipboard:
     def __init__(self):
@@ -15,7 +35,7 @@ class FIFOClipboard:
         self.is_pasting = False
         self.icon = None
         
-        # We want to capture Plain text, Web HTML (bold/colors), and Word Rich Text
+        # Capture Plain text, Web HTML (bold/colors), and Word Rich Text
         self.formats_to_save =[
             win32clipboard.CF_UNICODETEXT,
             win32clipboard.RegisterClipboardFormat("HTML Format"),
@@ -25,7 +45,6 @@ class FIFOClipboard:
     def get_clipboard_data(self):
         """Safely opens clipboard and extracts Plain Text, HTML, and RTF."""
         data = {}
-        # Try 5 times in case another app is currently locking the clipboard
         for _ in range(5):
             try:
                 win32clipboard.OpenClipboard()
@@ -65,14 +84,11 @@ class FIFOClipboard:
                 
                 if current_seq != self.last_seq and not self.is_pasting:
                     self.last_seq = current_seq
-                    time.sleep(0.05) # Wait for the copying app to release the clipboard
+                    time.sleep(0.05) 
                     
                     data = self.get_clipboard_data()
-                    
-                    # Extract the plain text version so we can display it in the tray menu
                     text = data.get(win32clipboard.CF_UNICODETEXT, "")
                     
-                    # If it has text, and it's not a spam duplicate of the last item
                     if text and (not self.queue or self.queue[-1]['text'] != text):
                         self.queue.append({'text': text, 'data': data})
                         self.update_tray()
@@ -87,7 +103,6 @@ class FIFOClipboard:
             self.is_pasting = True
             item = self.queue.popleft()
             
-            # Put the Rich Text / HTML back on the clipboard
             self.set_clipboard_data(item['data'])
             
             time.sleep(0.05) 
@@ -130,7 +145,7 @@ def main():
         icon.stop()
 
     def create_menu():
-        """Dynamically creates the menu list every time you right click the tray icon."""
+        """Dynamically creates the menu list every time you click the tray icon."""
         items =[]
         items.append(pystray.MenuItem(f"Items stored: {len(manager.queue)}", lambda: None, enabled=False))
         items.append(pystray.MenuItem("--------", lambda: None, enabled=False))
