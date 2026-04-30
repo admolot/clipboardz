@@ -2,12 +2,8 @@ import sys
 import time
 import threading
 import ctypes
+from ctypes import wintypes
 import keyboard
-
-# --- Fix for PyInstaller missing pywin32 modules ---
-import pywintypes
-import win32clipboard
-
 import pystray
 from PIL import Image, ImageDraw
 from collections import deque
@@ -19,12 +15,47 @@ if sys.platform == 'win32':
 
     def patched_on_notify(self, wparam, lparam):
         # 0x0202 is WM_LBUTTONUP (Left Click), 0x0205 is WM_RBUTTONUP (Right Click)
-        # If the user Left-Clicks, we instantly convert it to a Right-Click to force the menu to open.
         if lparam == 0x0202: 
             lparam = 0x0205 
         return original_on_notify(self, wparam, lparam)
 
     pystray._win32.Icon._on_notify = patched_on_notify
+# -----------------------------------------------------------------
+
+# --- Pure Ctypes Clipboard API (Fixes PyInstaller compilation issues) ---
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.argtypes =[]
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.argtypes =[]
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.GetClipboardData.argtypes =[wintypes.UINT]
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+user32.SetClipboardData.restype = wintypes.HANDLE
+user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+user32.RegisterClipboardFormatW.restype = wintypes.UINT
+
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = wintypes.HANDLE
+kernel32.GlobalLock.argtypes =[wintypes.HANDLE]
+kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalSize.argtypes = [wintypes.HANDLE]
+kernel32.GlobalSize.restype = ctypes.c_size_t
+
+HTML_FORMAT = user32.RegisterClipboardFormatW("HTML Format")
+RTF_FORMAT = user32.RegisterClipboardFormatW("Rich Text Format")
+FORMATS_TO_SAVE =[CF_UNICODETEXT, HTML_FORMAT, RTF_FORMAT]
 # -----------------------------------------------------------------
 
 class FIFOClipboard:
@@ -34,47 +65,48 @@ class FIFOClipboard:
         self.is_running = True
         self.is_pasting = False
         self.icon = None
-        
-        # Capture Plain text, Web HTML (bold/colors), and Word Rich Text
-        self.formats_to_save =[
-            win32clipboard.CF_UNICODETEXT,
-            win32clipboard.RegisterClipboardFormat("HTML Format"),
-            win32clipboard.RegisterClipboardFormat("Rich Text Format")
-        ]
 
     def get_clipboard_data(self):
-        """Safely opens clipboard and extracts Plain Text, HTML, and RTF."""
+        """Safely opens memory and extracts Plain Text, HTML, and RTF."""
         data = {}
         for _ in range(5):
-            try:
-                win32clipboard.OpenClipboard()
-                for fmt in self.formats_to_save:
-                    if win32clipboard.IsClipboardFormatAvailable(fmt):
-                        try:
-                            data[fmt] = win32clipboard.GetClipboardData(fmt)
-                        except Exception:
-                            pass
-                win32clipboard.CloseClipboard()
+            if user32.OpenClipboard(None):
+                try:
+                    for fmt in FORMATS_TO_SAVE:
+                        if user32.IsClipboardFormatAvailable(fmt):
+                            handle = user32.GetClipboardData(fmt)
+                            if handle:
+                                ptr = kernel32.GlobalLock(handle)
+                                if ptr:
+                                    size = kernel32.GlobalSize(handle)
+                                    # Grab exactly what is in memory as raw bytes
+                                    data[fmt] = ctypes.string_at(ptr, size)
+                                    kernel32.GlobalUnlock(handle)
+                finally:
+                    user32.CloseClipboard()
                 return data
-            except Exception:
-                time.sleep(0.02)
+            time.sleep(0.02)
         return data
 
     def set_clipboard_data(self, data):
-        """Safely opens clipboard and restores all formats."""
+        """Safely opens memory and restores all formats."""
         for _ in range(5):
-            try:
-                win32clipboard.OpenClipboard()
-                win32clipboard.EmptyClipboard()
-                for fmt, content in data.items():
-                    try:
-                        win32clipboard.SetClipboardData(fmt, content)
-                    except Exception:
-                        pass
-                win32clipboard.CloseClipboard()
+            if user32.OpenClipboard(None):
+                try:
+                    user32.EmptyClipboard()
+                    for fmt, buffer in data.items():
+                        size = len(buffer)
+                        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+                        if handle:
+                            ptr = kernel32.GlobalLock(handle)
+                            if ptr:
+                                ctypes.memmove(ptr, buffer, size)
+                                kernel32.GlobalUnlock(handle)
+                                user32.SetClipboardData(fmt, handle)
+                finally:
+                    user32.CloseClipboard()
                 return
-            except Exception:
-                time.sleep(0.02)
+            time.sleep(0.02)
 
     def monitor_clipboard(self):
         """Monitors Windows OS directly for copy events."""
@@ -87,7 +119,10 @@ class FIFOClipboard:
                     time.sleep(0.05) 
                     
                     data = self.get_clipboard_data()
-                    text = data.get(win32clipboard.CF_UNICODETEXT, "")
+                    
+                    # Convert the raw memory bytes back into a readable Python string for our menu
+                    raw_text_bytes = data.get(CF_UNICODETEXT, b"")
+                    text = raw_text_bytes.decode('utf-16-le', errors='ignore').rstrip('\x00')
                     
                     if text and (not self.queue or self.queue[-1]['text'] != text):
                         self.queue.append({'text': text, 'data': data})
