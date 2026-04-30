@@ -37,12 +37,12 @@ user32.EmptyClipboard.argtypes =[]
 user32.EmptyClipboard.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = [wintypes.UINT]
 user32.GetClipboardData.restype = wintypes.HANDLE
-user32.SetClipboardData.argtypes =[wintypes.UINT, wintypes.HANDLE]
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
 user32.SetClipboardData.restype = wintypes.HANDLE
 user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
 user32.EnumClipboardFormats.restype = wintypes.UINT
 
-kernel32.GlobalAlloc.argtypes =[wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = wintypes.HANDLE
 kernel32.GlobalLock.argtypes =[wintypes.HANDLE]
 kernel32.GlobalLock.restype = wintypes.LPVOID
@@ -129,13 +129,11 @@ class FIFOClipboard:
 
     def paste_oldest(self):
         """Triggered on Ctrl+V."""
-        # Prevent simultaneous overlapping pastes if pressed rapidly
         if self.is_pasting:
             return
             
         self.is_pasting = True
         
-        # Safely remove our custom hook so we can send a REAL Ctrl+V to the system
         try:
             keyboard.remove_hotkey(self.hk)
         except Exception:
@@ -145,31 +143,25 @@ class FIFOClipboard:
             if self.queue:
                 item = self.queue.popleft()
                 
-                # Put all formatting (HTML/Colors/Bold) back on the clipboard
                 self.set_clipboard_data(item['data'])
                 time.sleep(0.05) 
                 
-                # Trick the OS: Reset logical key states before pasting
                 keyboard.release('ctrl')
                 keyboard.release('v')
                 time.sleep(0.01)
                 
-                # Send standard Ctrl+V (which Anki MUST see to parse HTML!)
                 keyboard.send('ctrl+v')
                 time.sleep(0.05) 
                 
-                # Update OS Sequence ID so the monitor thread ignores this paste
                 self.last_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
                 self.update_tray()
             else:
-                # If memory is empty, just paste normally
                 keyboard.release('ctrl')
                 keyboard.release('v')
                 time.sleep(0.01)
                 keyboard.send('ctrl+v')
                 time.sleep(0.05)
         finally:
-            # Re-hook our script to capture the next Ctrl+V
             self.hk = keyboard.add_hotkey('ctrl+v', self.paste_oldest, suppress=True)
             self.is_pasting = False
 
@@ -177,6 +169,11 @@ class FIFOClipboard:
         """Updates the text you see when hovering over the tray icon."""
         if self.icon:
             self.icon.title = f"FIFO Clipboard: {len(self.queue)} items"
+            try:
+                # IMPORTANT FIX: Forces Windows to rebuild the dynamic menu!
+                self.icon.update_menu()
+            except Exception:
+                pass
 
     def start(self):
         self.hk = keyboard.add_hotkey('ctrl+v', self.paste_oldest, suppress=True)
@@ -203,24 +200,23 @@ def main():
         icon.stop()
 
     def create_menu():
-        """Dynamically creates the menu list every time you click the tray icon."""
-        items =[]
-        items.append(pystray.MenuItem(f"Items stored: {len(manager.queue)}", lambda: None, enabled=False))
-        items.append(pystray.MenuItem("--------", lambda: None, enabled=False))
+        """Dynamically yields the menu list every time you click the tray icon."""
+        # Note: pystray requires the lambda to take (icon, item) arguments
+        yield pystray.MenuItem(f"Items stored: {len(manager.queue)}", lambda icon, item: None, enabled=False)
+        yield pystray.MenuItem("--------", lambda icon, item: None, enabled=False)
         
         for i, item in enumerate(list(manager.queue)[:15]):
             text = item['text']
             preview = text.replace('\n', ' ').replace('\r', '')
             if len(preview) > 40:
                 preview = preview[:37] + "..."
-            items.append(pystray.MenuItem(f"{i+1}. {preview}", lambda: None, enabled=False))
+            yield pystray.MenuItem(f"{i+1}. {preview}", lambda icon, item: None, enabled=False)
             
         if len(manager.queue) > 15:
-            items.append(pystray.MenuItem(f"... and {len(manager.queue) - 15} more", lambda: None, enabled=False))
+            yield pystray.MenuItem(f"... and {len(manager.queue) - 15} more", lambda icon, item: None, enabled=False)
             
-        items.append(pystray.MenuItem("--------", lambda: None, enabled=False))
-        items.append(pystray.MenuItem("Quit", on_quit))
-        return items
+        yield pystray.MenuItem("--------", lambda icon, item: None, enabled=False)
+        yield pystray.MenuItem("Quit", on_quit)
 
     manager.icon = pystray.Icon(
         "FIFO_Clipboard",
