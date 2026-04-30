@@ -28,8 +28,7 @@ jobs:
 
     - name: Compile with PyInstaller
       run: |
-        # Added hidden-imports to properly bundle the win32clipboard modules
-        pyinstaller --noconsole --onefile --hidden-import pywintypes --hidden-import win32clipboard main.py
+        pyinstaller --noconsole --onefile main.py
 
     - name: Upload EXE
       uses: actions/upload-artifact@v4
