@@ -22,27 +22,25 @@ if sys.platform == 'win32':
     pystray._win32.Icon._on_notify = patched_on_notify
 # -----------------------------------------------------------------
 
-# --- Pure Ctypes Clipboard API (Fixes PyInstaller compilation issues) ---
+# --- Pure Ctypes Clipboard API ---
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
-user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.argtypes =[wintypes.HWND]
 user32.OpenClipboard.restype = wintypes.BOOL
 user32.CloseClipboard.argtypes =[]
 user32.CloseClipboard.restype = wintypes.BOOL
 user32.EmptyClipboard.argtypes =[]
 user32.EmptyClipboard.restype = wintypes.BOOL
-user32.GetClipboardData.argtypes =[wintypes.UINT]
+user32.GetClipboardData.argtypes = [wintypes.UINT]
 user32.GetClipboardData.restype = wintypes.HANDLE
-user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+user32.SetClipboardData.argtypes =[wintypes.UINT, wintypes.HANDLE]
 user32.SetClipboardData.restype = wintypes.HANDLE
-user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
-user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
-user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
-user32.RegisterClipboardFormatW.restype = wintypes.UINT
+user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
+user32.EnumClipboardFormats.restype = wintypes.UINT
 
 kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = wintypes.HANDLE
@@ -52,10 +50,6 @@ kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
 kernel32.GlobalUnlock.restype = wintypes.BOOL
 kernel32.GlobalSize.argtypes = [wintypes.HANDLE]
 kernel32.GlobalSize.restype = ctypes.c_size_t
-
-HTML_FORMAT = user32.RegisterClipboardFormatW("HTML Format")
-RTF_FORMAT = user32.RegisterClipboardFormatW("Rich Text Format")
-FORMATS_TO_SAVE =[CF_UNICODETEXT, HTML_FORMAT, RTF_FORMAT]
 # -----------------------------------------------------------------
 
 class FIFOClipboard:
@@ -67,21 +61,25 @@ class FIFOClipboard:
         self.icon = None
 
     def get_clipboard_data(self):
-        """Safely opens memory and extracts Plain Text, HTML, and RTF."""
+        """Safely opens memory and clones EVERY format on the clipboard."""
         data = {}
         for _ in range(5):
             if user32.OpenClipboard(None):
                 try:
-                    for fmt in FORMATS_TO_SAVE:
-                        if user32.IsClipboardFormatAvailable(fmt):
-                            handle = user32.GetClipboardData(fmt)
-                            if handle:
-                                ptr = kernel32.GlobalLock(handle)
-                                if ptr:
-                                    size = kernel32.GlobalSize(handle)
-                                    # Grab exactly what is in memory as raw bytes
-                                    data[fmt] = ctypes.string_at(ptr, size)
-                                    kernel32.GlobalUnlock(handle)
+                    fmt = 0
+                    while True:
+                        # Iterate through all available clipboard formats
+                        fmt = user32.EnumClipboardFormats(fmt)
+                        if fmt == 0:
+                            break
+                        handle = user32.GetClipboardData(fmt)
+                        if handle:
+                            ptr = kernel32.GlobalLock(handle)
+                            if ptr:
+                                size = kernel32.GlobalSize(handle)
+                                # Grab exactly what is in memory as raw bytes
+                                data[fmt] = ctypes.string_at(ptr, size)
+                                kernel32.GlobalUnlock(handle)
                 finally:
                     user32.CloseClipboard()
                 return data
@@ -89,7 +87,7 @@ class FIFOClipboard:
         return data
 
     def set_clipboard_data(self, data):
-        """Safely opens memory and restores all formats."""
+        """Safely opens memory and restores all cloned formats byte-for-byte."""
         for _ in range(5):
             if user32.OpenClipboard(None):
                 try:
@@ -120,10 +118,11 @@ class FIFOClipboard:
                     
                     data = self.get_clipboard_data()
                     
-                    # Convert the raw memory bytes back into a readable Python string for our menu
+                    # Convert the raw memory bytes back into a readable Python string for our tray menu
                     raw_text_bytes = data.get(CF_UNICODETEXT, b"")
                     text = raw_text_bytes.decode('utf-16-le', errors='ignore').rstrip('\x00')
                     
+                    # Ensure the copied object actually has text, and prevent duplicate spam
                     if text and (not self.queue or self.queue[-1]['text'] != text):
                         self.queue.append({'text': text, 'data': data})
                         self.update_tray()
@@ -138,6 +137,7 @@ class FIFOClipboard:
             self.is_pasting = True
             item = self.queue.popleft()
             
+            # Put every single format exactly back on the clipboard
             self.set_clipboard_data(item['data'])
             
             time.sleep(0.05) 
